@@ -91,13 +91,29 @@ class AutoSignService : Service() {
         }
         sendLog("✅ $loginMsg")
 
-        // 获取课程
-        sendLog("正在获取课程...")
-        val courses = signManager.getCourses()
-        if (courses.isEmpty()) {
-            sendLog("未找到当前学期课程")
-            updateNotification("未找到课程")
-            stopSelf()
+        // 获取课程（持续重试）
+        var courses = listOf<SignManager.Course>()
+        var retryCount = 0
+
+        while (running.get() && courses.isEmpty()) {
+            retryCount++
+            sendLog("正在获取课程... (第${retryCount}次)")
+            updateNotification("获取课程中... (第${retryCount}次)")
+
+            courses = signManager.getCourses()
+
+            if (courses.isEmpty()) {
+                sendLog("未找到课程，30秒后重试...")
+                try {
+                    Thread.sleep(30_000)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            }
+        }
+
+        if (!running.get()) {
+            isRunning = false
             return
         }
 
@@ -110,7 +126,7 @@ class AutoSignService : Service() {
         // 冷却计数器
         val cooldown = mutableMapOf<String, Int>()
 
-        // 主循环
+        // 主循环 - 持续监控签到
         while (running.get()) {
             for (course in courses) {
                 if (!running.get()) break

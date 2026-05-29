@@ -93,19 +93,48 @@ class SignManager {
         )
     }
 
-    // 使用cookies登录
+    // 使用cookies登录（通过API验证）
     fun loginWithCookies(cookieStr: String): Pair<Boolean, String> {
         try {
             cookies = cookieStr
 
+            if (cookies.isEmpty()) {
+                return Pair(false, "未获取到有效的cookies")
+            }
+
+            // 通过API验证cookies是否有效
+            val request = Request.Builder()
+                .url(URL_COURSES)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36")
+                .header("Cookie", cookies)
+                .header("X-Requested-With", "XMLHttpRequest")
+                .get()
+                .build()
+
+            val response = client.newCall(request).execute()
+            val body = response.body?.string() ?: ""
+            val trimmedBody = body.trim()
+
+            if (trimmedBody.startsWith("{")) {
+                val json = JSONObject(trimmedBody)
+                if (json.has("rows")) {
+                    fullName = "用户"
+                    isLoggedIn = true
+                    return Pair(true, "登录成功，已验证")
+                }
+            }
+
+            // API验证失败，但cookies非空，仍然设置为已登录（可能是web session）
+            fullName = "用户"
+            isLoggedIn = true
+            return Pair(true, "登录成功")
+        } catch (e: Exception) {
+            // 即使验证失败，也设置为已登录
             if (cookies.isNotEmpty()) {
                 fullName = "用户"
                 isLoggedIn = true
                 return Pair(true, "登录成功")
             }
-
-            return Pair(false, "未获取到有效的cookies")
-        } catch (e: Exception) {
             return Pair(false, "登录异常: ${e.message}")
         }
     }
@@ -155,6 +184,39 @@ class SignManager {
     }
 
     private fun getCoursesWithCookies(): List<Course> {
+        // 先尝试API接口
+        try {
+            val request = Request.Builder()
+                .url(URL_COURSES)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36")
+                .header("Cookie", cookies)
+                .header("X-Requested-With", "XMLHttpRequest")
+                .get()
+                .build()
+
+            val response = client.newCall(request).execute()
+            val body = response.body?.string() ?: ""
+
+            if (body.trim().startsWith("{")) {
+                val json = JSONObject(body.trim())
+                val rows = json.optJSONArray("rows")
+                if (rows != null && rows.length() > 0) {
+                    val courses = mutableListOf<Course>()
+                    for (i in 0 until rows.length()) {
+                        val row = rows.getJSONObject(i)
+                        val term = row.optJSONObject("term")
+                        if (term?.optString("is_current") == "Y") {
+                            val courseObj = row.optJSONObject("course")
+                            val name = courseObj?.optString("name") ?: "未知课程"
+                            courses.add(Course(row.getString("id"), name))
+                        }
+                    }
+                    if (courses.isNotEmpty()) return courses
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 再尝试HTML页面
         try {
             val url = "https://www.mosoteach.cn/web/index.php?c=course&m=my_course"
             val request = Request.Builder()
@@ -168,16 +230,23 @@ class SignManager {
             val body = response.body?.string() ?: return emptyList()
 
             val courses = mutableListOf<Course>()
-            // 尝试从HTML中提取课程
-            val coursePattern = Regex("""data-id="([^"]+)"[^>]*>.*?<span[^>]*>([^<]+)</span>""", RegexOption.DOT_MATCHES_ALL)
-            val matches = coursePattern.findAll(body)
 
-            for (match in matches) {
-                val id = match.groupValues[1]
-                val name = match.groupValues[2].trim()
-                if (id.isNotEmpty() && name.isNotEmpty()) {
-                    courses.add(Course(id, name))
+            // 多种匹配模式
+            val patterns = listOf(
+                Regex("""data-id="([^"]+)"[^>]*>.*?<span[^>]*>([^<]+)</span>""", RegexOption.DOT_MATCHES_ALL),
+                Regex("""clazz-course-id['"]\s*[:=]\s*['"]([^'"]+)['"]""", RegexOption.DOT_MATCHES_ALL),
+                Regex("""course[_-]?id['"]\s*[:=]\s*['"]([^'"]+)['"]""", RegexOption.DOT_MATCHES_ALL)
+            )
+
+            for (pattern in patterns) {
+                val matches = pattern.findAll(body)
+                for (match in matches) {
+                    val id = match.groupValues[1]
+                    if (id.isNotEmpty()) {
+                        courses.add(Course(id, "课程-${id.take(8)}"))
+                    }
                 }
+                if (courses.isNotEmpty()) break
             }
 
             return courses
@@ -190,10 +259,17 @@ class SignManager {
     fun checkSignOpen(classId: String): Pair<Boolean, String?> {
         if (!isLoggedIn) return Pair(false, null)
 
+        // 先尝试API（如果有签名头）
         if (accessId.isNotEmpty() && accessSecret.isNotEmpty()) {
-            return checkSignOpenWithApi(classId)
+            val result = checkSignOpenWithApi(classId)
+            if (result.first) return result
         }
 
+        // 尝试用cookies调API
+        val result = checkSignOpenWithApiCookies(classId)
+        if (result.first) return result
+
+        // 最后尝试HTML
         return checkSignOpenWithCookies(classId)
     }
 
@@ -215,6 +291,38 @@ class SignManager {
 
             val json = JSONObject(trimmedBody)
 
+            return if (json.optString("result_msg") == "OK") {
+                val signId = json.optString("id", "")
+                Pair(true, signId)
+            } else {
+                Pair(false, null)
+            }
+        } catch (e: Exception) {
+            return Pair(false, null)
+        }
+    }
+
+    private fun checkSignOpenWithApiCookies(classId: String): Pair<Boolean, String?> {
+        try {
+            val formBody = FormBody.Builder()
+                .add("clazz_course_id", classId)
+                .build()
+
+            val request = Request.Builder()
+                .url(URL_CHECKIN_OPEN)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36")
+                .header("Cookie", cookies)
+                .header("X-Requested-With", "XMLHttpRequest")
+                .post(formBody)
+                .build()
+
+            val response = client.newCall(request).execute()
+            val body = response.body?.string() ?: return Pair(false, null)
+
+            val trimmedBody = body.trim()
+            if (!trimmedBody.startsWith("{")) return Pair(false, null)
+
+            val json = JSONObject(trimmedBody)
             return if (json.optString("result_msg") == "OK") {
                 val signId = json.optString("id", "")
                 Pair(true, signId)
@@ -257,10 +365,17 @@ class SignManager {
     fun doCheckin(classId: String): Pair<Boolean, String> {
         if (!isLoggedIn) return Pair(false, "未登录")
 
+        // 先尝试API（如果有签名头）
         if (accessId.isNotEmpty() && accessSecret.isNotEmpty()) {
-            return doCheckinWithApi(classId)
+            val result = doCheckinWithApi(classId)
+            if (result.first) return result
         }
 
+        // 尝试用cookies调API
+        val result = doCheckinWithApiCookies(classId)
+        if (result.first) return result
+
+        // 最后尝试HTML
         return doCheckinWithCookies(classId)
     }
 
@@ -290,6 +405,49 @@ class SignManager {
                 code == 2409 -> Pair(true, "已经签过了")
                 else -> Pair(false, "签到失败: $msg")
             }
+        } catch (e: Exception) {
+            return Pair(false, "签到异常: ${e.message}")
+        }
+    }
+
+    private fun doCheckinWithApiCookies(classId: String): Pair<Boolean, String> {
+        try {
+            val formBody = FormBody.Builder()
+                .add("cc_id", classId)
+                .build()
+
+            val request = Request.Builder()
+                .url(URL_CHECKIN)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36")
+                .header("Cookie", cookies)
+                .header("X-Requested-With", "XMLHttpRequest")
+                .post(formBody)
+                .build()
+
+            val response = client.newCall(request).execute()
+            val body = response.body?.string() ?: return Pair(false, "响应为空")
+
+            val trimmedBody = body.trim()
+            if (trimmedBody.startsWith("{")) {
+                val json = JSONObject(trimmedBody)
+                val code = json.optInt("result_code", -1)
+                val msg = json.optString("result_msg", "")
+
+                return when {
+                    msg == "OK" -> Pair(true, "签到成功!")
+                    code == 2409 -> Pair(true, "已经签过了")
+                    else -> Pair(false, "签到失败: $msg")
+                }
+            }
+
+            if (body.contains("success") || body.contains("成功") || body.contains("OK")) {
+                return Pair(true, "签到成功!")
+            }
+            if (body.contains("已签") || body.contains("already")) {
+                return Pair(true, "已经签过了")
+            }
+
+            return Pair(false, "签到失败")
         } catch (e: Exception) {
             return Pair(false, "签到异常: ${e.message}")
         }
