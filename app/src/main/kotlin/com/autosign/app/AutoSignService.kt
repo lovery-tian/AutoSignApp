@@ -6,9 +6,12 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class AutoSignService : Service() {
@@ -17,12 +20,14 @@ class AutoSignService : Service() {
         const val CHANNEL_ID = "autosign_channel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.autosign.app.STOP"
+        private const val TAG = "AutoSignService"
 
         var isRunning = false
         var logCallback: ((String) -> Unit)? = null
     }
 
     private val signManager = SignManager()
+    private lateinit var webHelper: WebApiHelper
     private val running = AtomicBoolean(false)
     private var workerThread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -32,6 +37,7 @@ class AutoSignService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        webHelper = WebApiHelper(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -71,6 +77,7 @@ class AutoSignService : Service() {
         running.set(false)
         isRunning = false
         workerThread?.interrupt()
+        webHelper.destroy()
         releaseWakeLock()
         sendLog("自动签到已停止")
         super.onDestroy()
@@ -91,7 +98,7 @@ class AutoSignService : Service() {
         }
         sendLog("✅ $loginMsg")
 
-        // 获取课程（持续重试）
+        // 通过WebView获取课程（持续重试）
         var courses = listOf<SignManager.Course>()
         var retryCount = 0
 
@@ -100,7 +107,17 @@ class AutoSignService : Service() {
             sendLog("正在获取课程... (第${retryCount}次)")
             updateNotification("获取课程中... (第${retryCount}次)")
 
-            courses = signManager.getCourses()
+            val latch = CountDownLatch(1)
+            webHelper.getCoursesViaWebView(cookies) { result ->
+                courses = result
+                latch.countDown()
+            }
+
+            try {
+                latch.await(15, TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {
+                break
+            }
 
             if (courses.isEmpty()) {
                 sendLog("未找到课程，30秒后重试...")
@@ -139,14 +156,43 @@ class AutoSignService : Service() {
                 }
 
                 try {
-                    // 检查签到
-                    val (isOpen, _) = signManager.checkSignOpen(course.id)
+                    // 通过WebView检查签到
+                    val signLatch = CountDownLatch(1)
+                    var isOpen = false
+                    var signId: String? = null
+
+                    webHelper.checkSignViaWebView(course.id, cookies) { open, id ->
+                        isOpen = open
+                        signId = id
+                        signLatch.countDown()
+                    }
+
+                    try {
+                        signLatch.await(10, TimeUnit.SECONDS)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
 
                     if (isOpen) {
                         sendLog("检测到签到: ${course.name}")
 
-                        // 执行签到
-                        val (signOk, signMsg) = signManager.doCheckin(course.id)
+                        // 通过WebView执行签到
+                        val doLatch = CountDownLatch(1)
+                        var signOk = false
+                        var signMsg = ""
+
+                        webHelper.doSignViaWebView(course.id, cookies) { ok, msg ->
+                            signOk = ok
+                            signMsg = msg
+                            doLatch.countDown()
+                        }
+
+                        try {
+                            doLatch.await(15, TimeUnit.SECONDS)
+                        } catch (_: InterruptedException) {
+                            break
+                        }
+
                         sendLog("${course.name}: $signMsg")
 
                         if (signOk) {
@@ -158,6 +204,7 @@ class AutoSignService : Service() {
                     }
                 } catch (e: Exception) {
                     sendLog("异常: ${e.message}")
+                    Log.e(TAG, "签到异常", e)
                 }
             }
 
@@ -175,6 +222,7 @@ class AutoSignService : Service() {
     private fun sendLog(msg: String) {
         val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         val line = "[$time] $msg"
+        Log.d(TAG, line)
         logCallback?.invoke(line)
     }
 

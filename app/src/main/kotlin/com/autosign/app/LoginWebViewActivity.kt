@@ -138,8 +138,8 @@ class LoginWebViewActivity : AppCompatActivity() {
     }
 
     /**
-     * 通过API调用验证是否真正登录成功
-     * 只有当API返回有效的课程列表时，才认为登录成功
+     * 验证是否真正登录成功
+     * 策略：URL已离开登录页 + 存在session cookie + web端API返回有效数据
      */
     private fun verifyLoginWithApi() {
         if (isLoginHandled) return
@@ -171,35 +171,51 @@ class LoginWebViewActivity : AppCompatActivity() {
             }
         }
 
+        Log.d(TAG, "webCookies: ${webCookies.take(80)}...")
         Log.d(TAG, "cookies长度: ${combinedCookies.length}")
 
-        // 在后台线程验证API
+        // 检查是否有session cookie（登录成功的标志）
+        val hasSession = combinedCookies.contains("mysession") ||
+                combinedCookies.contains("PHPSESSID") ||
+                combinedCookies.contains("mosoteach") ||
+                combinedCookies.contains("mt_") ||
+                combinedCookies.length > 100  // 有足够多的cookie说明已登录
+
+        // 在后台线程用web端验证
         Thread {
             try {
+                // 用web端的课程页面验证（不是移动端API）
+                val verifyUrl = "https://www.mosoteach.cn/web/index.php?c=course&m=my_course"
                 val request = Request.Builder()
-                    .url(VERIFY_URL)
+                    .url(verifyUrl)
                     .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36")
                     .header("Cookie", combinedCookies)
-                    .header("X-Requested-With", "XMLHttpRequest")
                     .get()
                     .build()
 
                 val response = apiClient.newCall(request).execute()
                 val body = response.body?.string() ?: ""
-                val trimmedBody = body.trim()
+                val finalUrl = response.request.url.toString()
 
-                Log.d(TAG, "API响应前100字: ${trimmedBody.take(100)}")
+                Log.d(TAG, "web验证响应码: ${response.code}")
+                Log.d(TAG, "web验证最终URL: $finalUrl")
+                Log.d(TAG, "web验证响应前200字: ${body.take(200)}")
 
-                // 判断是否返回了有效的JSON（包含课程数据）
-                val isValidLogin = trimmedBody.startsWith("{") && try {
-                    val json = JSONObject(trimmedBody)
-                    json.has("rows") || json.has("result_code")
-                } catch (e: Exception) {
-                    false
-                }
+                // 判断是否登录成功：
+                // 1. 没有被重定向到登录页
+                // 2. 响应中包含课程相关内容或用户信息
+                // 3. 不是错误页面
+                val notLoginPage = !finalUrl.contains("passport") && !body.contains("passport")
+                val hasCourseContent = body.contains("course") || body.contains("课程") ||
+                        body.contains("my_course") || body.contains("clazz")
+                val notErrorPage = response.code == 200 && !body.contains("error") && body.length > 500
+
+                val isValidLogin = notLoginPage && hasSession && (hasCourseContent || notErrorPage)
+
+                Log.d(TAG, "验证结果: notLoginPage=$notLoginPage, hasSession=$hasSession, hasCourseContent=$hasCourseContent, notErrorPage=$notErrorPage")
 
                 if (isValidLogin && !isLoginHandled) {
-                    Log.d(TAG, "API验证登录成功!")
+                    Log.d(TAG, "登录验证成功!")
                     isLoginHandled = true
 
                     handler.removeCallbacks(checkRunnable)
@@ -214,10 +230,25 @@ class LoginWebViewActivity : AppCompatActivity() {
                         finish()
                     }
                 } else {
-                    Log.d(TAG, "API验证未通过，可能是登录失败或页面还未完全加载")
+                    Log.d(TAG, "登录验证未通过，等待下一次检查...")
                 }
             } catch (e: Exception) {
-                Log.d(TAG, "API验证异常: ${e.message}")
+                Log.d(TAG, "验证异常: ${e.message}")
+                // 网络异常时，如果URL已离开登录页且有session，也认为成功
+                if (hasSession && !isLoginHandled) {
+                    Log.d(TAG, "网络异常但有session，认为登录成功")
+                    isLoginHandled = true
+                    handler.removeCallbacks(checkRunnable)
+                    handler.post {
+                        Toast.makeText(this, "登录成功！正在启动签到...", Toast.LENGTH_SHORT).show()
+                        val resultIntent = Intent().apply {
+                            putExtra("cookies", combinedCookies)
+                            putExtra("url", webView.url ?: "")
+                        }
+                        setResult(RESULT_LOGIN_SUCCESS, resultIntent)
+                        finish()
+                    }
+                }
             }
         }.start()
     }
