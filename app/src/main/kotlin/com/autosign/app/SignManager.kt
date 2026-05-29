@@ -93,120 +93,24 @@ class SignManager {
         )
     }
 
-    /**
-     * 使用cookies登录（从WebView获取）
-     */
+    // 使用cookies登录
     fun loginWithCookies(cookieStr: String): Pair<Boolean, String> {
         try {
             cookies = cookieStr
 
-            // 使用cookies访问用户信息API
-            val url = "https://www.mosoteach.cn/web/index.php?c=myzone&m=index"
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
-                .header("Cookie", cookies)
-                .get()
-                .build()
-
-            val response = client.newCall(request).execute()
-            val body = response.body?.string() ?: return Pair(false, "获取用户信息失败")
-
-            // 从页面中提取用户信息
-            // 尝试提取proxyToken
-            val tokenMatch = Regex("proxyToken['\"]?\\s*[:=]\\s*['\"]([a-f0-9]+)['\"]").find(body)
-            if (tokenMatch != null) {
-                val token = tokenMatch.groupValues[1]
-                return getUserInfoByToken(token)
-            }
-
-            // 尝试提取用户ID
-            val userIdMatch = Regex("user_id['\"]?\\s*[:=]\\s*['\"]([a-f0-9-]+)['\"]").find(body)
-            if (userIdMatch != null) {
-                userId = userIdMatch.groupValues[1]
+            if (cookies.isNotEmpty()) {
                 fullName = "用户"
-                isLoggedIn = true
-                return Pair(true, "登录成功（通过Cookies）")
-            }
-
-            // 如果cookies有效但无法提取信息，仍然标记为已登录
-            if (body.contains("我的空间") || body.contains("退出") || body.contains("logout")) {
-                fullName = "用户"
-                isLoggedIn = true
-                return Pair(true, "登录成功（通过Cookies）")
-            }
-
-            return Pair(false, "无法获取用户信息，请重新登录")
-        } catch (e: Exception) {
-            return Pair(false, "登录异常: ${e.message}")
-        }
-    }
-
-    private fun getUserInfoByToken(token: String): Pair<Boolean, String> {
-        try {
-            val url = "https://api.mosoteach.cn/mssvc/index.php/user/info"
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 5 Build/SD1A.210817.037)")
-                .header("X-app-id", "MTANDROID")
-                .header("X-app-version", "5.4.28")
-                .header("X-token", token)
-                .get()
-                .build()
-
-            val response = client.newCall(request).execute()
-            val body = response.body?.string() ?: return Pair(false, "响应为空")
-
-            val trimmedBody = body.trim()
-            if (!trimmedBody.startsWith("{")) {
-                // 即使无法获取详细信息，cookies有效也算登录成功
                 isLoggedIn = true
                 return Pair(true, "登录成功")
             }
 
-            val json = JSONObject(trimmedBody)
-            if (json.has("user_id")) {
-                userId = json.getString("user_id")
-                fullName = json.optString("full_name", "用户")
-                accessId = json.optString("access_id", "")
-                accessSecret = json.optString("access_secret", "")
-                secTs = json.optString("last_sec_update_ts_s", "")
-                isLoggedIn = true
-                return Pair(true, "登录成功: $fullName")
-            }
-
-            isLoggedIn = true
-            return Pair(true, "登录成功")
-        } catch (e: Exception) {
-            isLoggedIn = true
-            return Pair(true, "登录成功（部分功能可能受限）")
-        }
-    }
-
-    /**
-     * 使用WebView获取的用户数据登录
-     */
-    fun loginWithWebViewData(data: String): Pair<Boolean, String> {
-        try {
-            val json = JSONObject(data)
-            if (json.has("user_id")) {
-                userId = json.getString("user_id")
-                fullName = json.optString("full_name", "用户")
-                accessId = json.optString("access_id", "")
-                accessSecret = json.optString("access_secret", "")
-                secTs = json.optString("last_sec_update_ts_s", "")
-                isLoggedIn = true
-                return Pair(true, "登录成功: $fullName")
-            }
-            return Pair(false, "解析用户信息失败")
+            return Pair(false, "未获取到有效的cookies")
         } catch (e: Exception) {
             return Pair(false, "登录异常: ${e.message}")
         }
     }
 
-    /**
-     * 获取当前学期课程列表
-     */
+    // 获取课程列表
     fun getCourses(): List<Course> {
         if (!isLoggedIn) return emptyList()
 
@@ -263,8 +167,8 @@ class SignManager {
             val response = client.newCall(request).execute()
             val body = response.body?.string() ?: return emptyList()
 
-            // 从HTML中提取课程信息
             val courses = mutableListOf<Course>()
+            // 尝试从HTML中提取课程
             val coursePattern = Regex("""data-id="([^"]+)"[^>]*>.*?<span[^>]*>([^<]+)</span>""", RegexOption.DOT_MATCHES_ALL)
             val matches = coursePattern.findAll(body)
 
@@ -282,18 +186,14 @@ class SignManager {
         }
     }
 
-    /**
-     * 检查签到是否开启
-     */
+    // 检查签到是否开启
     fun checkSignOpen(classId: String): Pair<Boolean, String?> {
         if (!isLoggedIn) return Pair(false, null)
 
-        // 如果有签名信息，使用API
         if (accessId.isNotEmpty() && accessSecret.isNotEmpty()) {
             return checkSignOpenWithApi(classId)
         }
 
-        // 否则使用cookies
         return checkSignOpenWithCookies(classId)
     }
 
@@ -339,9 +239,7 @@ class SignManager {
             val response = client.newCall(request).execute()
             val body = response.body?.string() ?: return Pair(false, null)
 
-            // 检查是否有签到活动
             if (body.contains("签到") && body.contains("clockin")) {
-                // 提取签到ID
                 val signIdMatch = Regex("""clockin_id['"]?\s*[:=]\s*['"]([a-f0-9-]+)['"]""").find(body)
                 if (signIdMatch != null) {
                     return Pair(true, signIdMatch.groupValues[1])
@@ -355,18 +253,14 @@ class SignManager {
         }
     }
 
-    /**
-     * 执行签到
-     */
+    // 执行签到
     fun doCheckin(classId: String): Pair<Boolean, String> {
         if (!isLoggedIn) return Pair(false, "未登录")
 
-        // 如果有签名信息，使用API
         if (accessId.isNotEmpty() && accessSecret.isNotEmpty()) {
             return doCheckinWithApi(classId)
         }
 
-        // 否则使用cookies
         return doCheckinWithCookies(classId)
     }
 
@@ -419,7 +313,6 @@ class SignManager {
             val response = client.newCall(request).execute()
             val body = response.body?.string() ?: return Pair(false, "响应为空")
 
-            // 检查是否成功
             if (body.contains("success") || body.contains("成功") || body.contains("OK")) {
                 return Pair(true, "签到成功!")
             }
