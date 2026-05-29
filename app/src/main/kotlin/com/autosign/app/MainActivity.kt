@@ -24,6 +24,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etUsername: EditText
     private lateinit var etPassword: EditText
     private lateinit var btnTogglePassword: ImageButton
+    private lateinit var btnLogin: Button
     private lateinit var btnWebViewLogin: Button
     private lateinit var switchAutoSign: Switch
     private lateinit var tvStatus: TextView
@@ -46,6 +47,7 @@ class MainActivity : AppCompatActivity() {
         etUsername = findViewById(R.id.etUsername)
         etPassword = findViewById(R.id.etPassword)
         btnTogglePassword = findViewById(R.id.btnTogglePassword)
+        btnLogin = findViewById(R.id.btnLogin)
         btnWebViewLogin = findViewById(R.id.btnWebViewLogin)
         switchAutoSign = findViewById(R.id.switchAutoSign)
         tvStatus = findViewById(R.id.tvStatus)
@@ -66,8 +68,8 @@ class MainActivity : AppCompatActivity() {
             etPassword.setSelection(etPassword.text.length)
         }
 
-        // WebView登录按钮 - 登录成功后自动启动签到
-        btnWebViewLogin.setOnClickListener {
+        // 直接登录按钮（API登录）
+        btnLogin.setOnClickListener {
             val username = etUsername.text.toString().trim()
             val password = etPassword.text.toString().trim()
 
@@ -82,7 +84,50 @@ class MainActivity : AppCompatActivity() {
                 .putString("password", password)
                 .apply()
 
-            // 打开WebView登录
+            appendLog("[系统] 正在登录...")
+            btnLogin.isEnabled = false
+
+            // 在后台线程执行API登录
+            Thread {
+                val signManager = SignManager()
+                val (ok, msg) = signManager.login(username, password)
+
+                runOnUiThread {
+                    btnLogin.isEnabled = true
+                    if (ok) {
+                        appendLog("[系统] ✅ $msg")
+                        // 保存凭证
+                        prefs.edit()
+                            .putString("accessId", signManager.accessId)
+                            .putString("accessSecret", signManager.accessSecret)
+                            .putString("secTs", signManager.secTs)
+                            .putString("userId", signManager.userId)
+                            .apply()
+                        // 自动启动签到
+                        startAutoSign(username, password, "")
+                    } else {
+                        appendLog("[系统] ❌ $msg")
+                        Toast.makeText(this, "登录失败: $msg", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }.start()
+        }
+
+        // WebView登录按钮（备用方案）
+        btnWebViewLogin.setOnClickListener {
+            val username = etUsername.text.toString().trim()
+            val password = etPassword.text.toString().trim()
+
+            if (username.isEmpty() || password.isEmpty()) {
+                Toast.makeText(this, "请先输入账号和密码", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            prefs.edit()
+                .putString("username", username)
+                .putString("password", password)
+                .apply()
+
             val intent = Intent(this, LoginWebViewActivity::class.java).apply {
                 putExtra(LoginWebViewActivity.EXTRA_USERNAME, username)
                 putExtra(LoginWebViewActivity.EXTRA_PASSWORD, password)
@@ -114,7 +159,7 @@ class MainActivity : AppCompatActivity() {
         // 开关监听
         switchAutoSign.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
-                startAutoSign()
+                startAutoSignFromSwitch()
             } else {
                 stopAutoSign()
             }
@@ -130,34 +175,23 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == REQUEST_WEB_LOGIN) {
             if (resultCode == LoginWebViewActivity.RESULT_LOGIN_SUCCESS) {
                 val cookies = data?.getStringExtra("cookies") ?: ""
-                val url = data?.getStringExtra("url") ?: ""
+                val username = etUsername.text.toString().trim()
+                val password = etPassword.text.toString().trim()
 
-                if (cookies.isNotEmpty()) {
-                    appendLog("[系统] WebView登录成功!")
-                    // 保存cookies
-                    prefs.edit().putString("cookies", cookies).apply()
-                    // 自动启动签到服务
-                    startAutoSignWithCookies(cookies)
-                } else {
-                    appendLog("[系统] 登录失败：未获取到cookies")
-                    Toast.makeText(this, "登录失败，请重试", Toast.LENGTH_SHORT).show()
-                }
+                appendLog("[系统] WebView登录成功!")
+                prefs.edit().putString("cookies", cookies).apply()
+                startAutoSign(username, password, cookies)
             } else {
                 appendLog("[系统] 登录取消或失败")
             }
         }
     }
 
-    private fun startAutoSignWithCookies(cookies: String) {
-        val username = etUsername.text.toString().trim()
-        val password = etPassword.text.toString().trim()
-
-        // 清空日志
+    private fun startAutoSign(username: String, password: String, cookies: String) {
         logLines.clear()
         tvLog.text = ""
         tvCourses.text = "正在获取..."
 
-        // 启动前台服务
         val intent = Intent(this, AutoSignService::class.java).apply {
             putExtra("username", username)
             putExtra("password", password)
@@ -174,7 +208,7 @@ class MainActivity : AppCompatActivity() {
         appendLog("[系统] 自动签到服务启动中...")
     }
 
-    private fun startAutoSign() {
+    private fun startAutoSignFromSwitch() {
         val username = etUsername.text.toString().trim()
         val password = etPassword.text.toString().trim()
 
@@ -184,41 +218,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 保存账号
         prefs.edit()
             .putString("username", username)
             .putString("password", password)
             .apply()
 
-        // 清空日志
-        logLines.clear()
-        tvLog.text = ""
-        tvCourses.text = "正在获取..."
-
-        // 获取保存的cookies
         val cookies = prefs.getString("cookies", "") ?: ""
-
-        if (cookies.isEmpty()) {
-            appendLog("[系统] 请先点击'WebView登录'按钮登录")
-            switchAutoSign.isChecked = false
-            return
-        }
-
-        // 启动前台服务
-        val intent = Intent(this, AutoSignService::class.java).apply {
-            putExtra("username", username)
-            putExtra("password", password)
-            putExtra("cookies", cookies)
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
-
-        updateUI(true)
-        appendLog("[系统] 自动签到服务启动中...")
+        startAutoSign(username, password, cookies)
     }
 
     private fun stopAutoSign() {
@@ -236,6 +242,7 @@ class MainActivity : AppCompatActivity() {
             tvSwitchHint.text = "签到服务正在后台运行"
             etUsername.isEnabled = false
             etPassword.isEnabled = false
+            btnLogin.isEnabled = false
             btnWebViewLogin.isEnabled = false
         } else {
             tvStatus.text = "状态: 未启动"
@@ -243,6 +250,7 @@ class MainActivity : AppCompatActivity() {
             tvSwitchHint.text = "打开后自动检测并完成签到"
             etUsername.isEnabled = true
             etPassword.isEnabled = true
+            btnLogin.isEnabled = true
             btnWebViewLogin.isEnabled = true
         }
     }

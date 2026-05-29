@@ -10,8 +10,6 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class AutoSignService : Service() {
@@ -27,7 +25,6 @@ class AutoSignService : Service() {
     }
 
     private val signManager = SignManager()
-    private lateinit var webHelper: WebApiHelper
     private val running = AtomicBoolean(false)
     private var workerThread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -37,7 +34,6 @@ class AutoSignService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        webHelper = WebApiHelper(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -52,12 +48,6 @@ class AutoSignService : Service() {
 
         if (username.isEmpty() || password.isEmpty()) {
             sendLog("错误: 账号或密码为空")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        if (cookies.isEmpty()) {
-            sendLog("错误: 未登录，请先使用WebView登录")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -77,56 +67,61 @@ class AutoSignService : Service() {
         running.set(false)
         isRunning = false
         workerThread?.interrupt()
-        webHelper.destroy()
         releaseWakeLock()
         sendLog("自动签到已停止")
         super.onDestroy()
     }
 
     private fun workerLoop(username: String, password: String, cookies: String) {
-        // 使用cookies登录
+        // 优先使用API直接登录
         sendLog("正在登录...")
-        val (loginOk, loginMsg) = signManager.loginWithCookies(cookies)
+        val (loginOk, loginMsg) = signManager.login(username, password)
 
         if (!loginOk) {
-            sendLog("❌ $loginMsg")
-            sendLog("请重新使用WebView登录")
-            updateNotification("登录失败: $loginMsg")
-            Thread.sleep(3000)
-            stopSelf()
-            return
-        }
-        sendLog("✅ $loginMsg")
+            sendLog("API登录失败: $loginMsg")
 
-        // 通过WebView获取课程（持续重试）
-        var courses = listOf<SignManager.Course>()
+            // 如果有cookies，尝试cookies登录
+            if (cookies.isNotEmpty()) {
+                sendLog("尝试cookies登录...")
+                val (cookieOk, cookieMsg) = signManager.loginWithCookies(cookies)
+                if (cookieOk) {
+                    sendLog("✅ $cookieMsg")
+                } else {
+                    sendLog("❌ $cookieMsg")
+                    sendLog("请重新登录")
+                    updateNotification("登录失败")
+                    Thread.sleep(3000)
+                    stopSelf()
+                    return
+                }
+            } else {
+                sendLog("❌ 请重新登录")
+                updateNotification("登录失败")
+                Thread.sleep(3000)
+                stopSelf()
+                return
+            }
+        } else {
+            sendLog("✅ $loginMsg")
+        }
+
+        // 获取课程
+        sendLog("正在获取课程...")
+        var courses = signManager.getCourses()
         var retryCount = 0
 
         while (running.get() && courses.isEmpty()) {
             retryCount++
-            sendLog("正在获取课程... (第${retryCount}次)")
+            sendLog("未找到当前学期课程，30秒后重试... (第${retryCount}次)")
             updateNotification("获取课程中... (第${retryCount}次)")
 
-            val latch = CountDownLatch(1)
-            webHelper.getCoursesViaWebView(cookies) { result ->
-                courses = result
-                latch.countDown()
-            }
-
             try {
-                latch.await(15, TimeUnit.SECONDS)
-            } catch (_: InterruptedException) {
+                Thread.sleep(30_000)
+            } catch (e: InterruptedException) {
                 break
             }
 
-            if (courses.isEmpty()) {
-                sendLog("未找到课程，30秒后重试...")
-                try {
-                    Thread.sleep(30_000)
-                } catch (e: InterruptedException) {
-                    break
-                }
-            }
+            courses = signManager.getCourses()
         }
 
         if (!running.get()) {
@@ -156,47 +151,22 @@ class AutoSignService : Service() {
                 }
 
                 try {
-                    // 通过WebView检查签到
-                    val signLatch = CountDownLatch(1)
-                    var isOpen = false
-                    var signId: String? = null
+                    // 检查签到
+                    val checkinInfo = signManager.checkSignOpen(course.id)
 
-                    webHelper.checkSignViaWebView(course.id, cookies) { open, id ->
-                        isOpen = open
-                        signId = id
-                        signLatch.countDown()
-                    }
+                    if (checkinInfo.isOpen) {
+                        sendLog("检测到签到: ${course.name} (类型: ${checkinInfo.type})")
 
-                    try {
-                        signLatch.await(10, TimeUnit.SECONDS)
-                    } catch (_: InterruptedException) {
-                        break
-                    }
-
-                    if (isOpen) {
-                        sendLog("检测到签到: ${course.name}")
-
-                        // 通过WebView执行签到
-                        val doLatch = CountDownLatch(1)
-                        var signOk = false
-                        var signMsg = ""
-
-                        webHelper.doSignViaWebView(course.id, cookies) { ok, msg ->
-                            signOk = ok
-                            signMsg = msg
-                            doLatch.countDown()
-                        }
-
-                        try {
-                            doLatch.await(15, TimeUnit.SECONDS)
-                        } catch (_: InterruptedException) {
-                            break
-                        }
-
+                        // 执行签到
+                        val (signOk, signMsg) = signManager.doCheckin(
+                            course.id,
+                            checkinInfo.checkinId,
+                            checkinInfo.type
+                        )
                         sendLog("${course.name}: $signMsg")
 
                         if (signOk) {
-                            cooldown[course.id] = 60 // 成功后冷却60轮
+                            cooldown[course.id] = 60 // 成功后冷却60轮（约15分钟）
                             updateNotification("刚签到: ${course.name}")
                         } else {
                             cooldown[course.id] = 10
@@ -271,7 +241,7 @@ class AutoSignService : Service() {
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AutoSign::WakeLock")
-        wakeLock?.acquire(12 * 60 * 60 * 1000L) // 最长12小时
+        wakeLock?.acquire(12 * 60 * 60 * 1000L)
     }
 
     private fun releaseWakeLock() {

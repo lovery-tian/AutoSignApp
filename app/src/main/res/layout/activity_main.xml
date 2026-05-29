@@ -97,14 +97,24 @@
             </RelativeLayout>
 
             <Button
-                android:id="@+id/btnWebViewLogin"
+                android:id="@+id/btnLogin"
                 android:layout_width="match_parent"
                 android:layout_height="44dp"
-                android:text="WebView登录（推荐）"
+                android:text="登录"
                 android:textColor="#FFFFFFFF"
-                android:textSize="14sp"
-                android:backgroundTint="#FF2196F3"
+                android:textSize="15sp"
+                android:backgroundTint="#FF4CAF50"
                 android:layout_marginTop="4dp" />
+
+            <Button
+                android:id="@+id/btnWebViewLogin"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:text="WebView登录（备用）"
+                android:textColor="#FFB0B0B0"
+                android:textSize="12sp"
+                android:backgroundTint="#FF333333"
+                android:layout_marginTop="6dp" />
 
         </LinearLayout>
 
