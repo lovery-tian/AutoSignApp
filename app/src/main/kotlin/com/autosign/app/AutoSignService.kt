@@ -74,12 +74,15 @@ class AutoSignService : Service() {
         sendLog("正在登录...")
         val (loginOk, loginMsg) = signManager.login(username, password)
         if (!loginOk) {
-            sendLog(loginMsg)
-            updateNotification("登录失败")
+            sendLog("❌ $loginMsg")
+            sendLog("请检查账号密码是否正确，然后重新开启签到")
+            updateNotification("登录失败: $loginMsg")
+            // 延迟2秒后停止，让用户看到错误信息
+            Thread.sleep(2000)
             stopSelf()
             return
         }
-        sendLog(loginMsg)
+        sendLog("✅ $loginMsg")
 
         // 获取课程
         sendLog("正在获取课程...")

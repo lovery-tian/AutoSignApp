@@ -118,12 +118,30 @@ class SignManager {
 
             val request = Request.Builder()
                 .url(URL_LOGIN)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("Accept", "application/json")
                 .post(formBody)
                 .build()
 
             val response = client.newCall(request).execute()
             val body = response.body?.string() ?: return Pair(false, "响应为空")
-            val json = JSONObject(body)
+
+            // 检查响应是否为JSON格式
+            val trimmedBody = body.trim()
+            if (!trimmedBody.startsWith("{")) {
+                // 服务器返回了HTML或其他非JSON内容
+                return when {
+                    trimmedBody.contains("DOCTYPE") || trimmedBody.contains("<html") ->
+                        Pair(false, "账号或密码错误")
+                    trimmedBody.contains("error") || trimmedBody.contains("Error") ->
+                        Pair(false, "服务器错误，请稍后重试")
+                    else ->
+                        Pair(false, "登录失败: 服务器返回异常响应")
+                }
+            }
+
+            val json = JSONObject(trimmedBody)
 
             return if (json.has("user")) {
                 val user = json.getJSONObject("user")
@@ -136,8 +154,22 @@ class SignManager {
                 Pair(true, "登录成功: $fullName")
             } else {
                 val msg = json.optString("result_msg", "未知错误")
-                Pair(false, "登录失败: $msg")
+                val code = json.optInt("result_code", -1)
+                when {
+                    msg.contains("密码") || msg.contains("password") ->
+                        Pair(false, "密码错误，请重新输入")
+                    msg.contains("账号") || msg.contains("account") || msg.contains("exist") ->
+                        Pair(false, "账号不存在或未注册")
+                    code == 1001 ->
+                        Pair(false, "账号或密码错误")
+                    else ->
+                        Pair(false, "登录失败: $msg")
+                }
             }
+        } catch (e: java.net.SocketTimeoutException) {
+            return Pair(false, "网络超时，请检查网络连接")
+        } catch (e: java.net.UnknownHostException) {
+            return Pair(false, "无法连接服务器，请检查网络")
         } catch (e: Exception) {
             return Pair(false, "登录异常: ${e.message}")
         }
@@ -156,7 +188,12 @@ class SignManager {
 
             val response = client.newCall(requestBuilder.build()).execute()
             val body = response.body?.string() ?: return emptyList()
-            val json = JSONObject(body)
+
+            // 检查响应是否为JSON
+            val trimmedBody = body.trim()
+            if (!trimmedBody.startsWith("{")) return emptyList()
+
+            val json = JSONObject(trimmedBody)
             val rows = json.optJSONArray("rows") ?: return emptyList()
 
             val courses = mutableListOf<Course>()
@@ -193,7 +230,12 @@ class SignManager {
 
             val response = client.newCall(requestBuilder.build()).execute()
             val body = response.body?.string() ?: return Pair(false, null)
-            val json = JSONObject(body)
+
+            // 检查响应是否为JSON
+            val trimmedBody = body.trim()
+            if (!trimmedBody.startsWith("{")) return Pair(false, null)
+
+            val json = JSONObject(trimmedBody)
 
             return if (json.optString("result_msg") == "OK") {
                 val signId = json.optString("id", "")
@@ -224,7 +266,12 @@ class SignManager {
 
             val response = client.newCall(requestBuilder.build()).execute()
             val body = response.body?.string() ?: return Pair(false, "响应为空")
-            val json = JSONObject(body)
+
+            // 检查响应是否为JSON
+            val trimmedBody = body.trim()
+            if (!trimmedBody.startsWith("{")) return Pair(false, "签到失败: 服务器返回异常")
+
+            val json = JSONObject(trimmedBody)
 
             val code = json.optInt("result_code", -1)
             val msg = json.optString("result_msg", "")
