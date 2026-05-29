@@ -65,19 +65,46 @@
                 android:layout_marginBottom="10dp"
                 android:singleLine="true" />
 
-            <EditText
-                android:id="@+id/etPassword"
+            <RelativeLayout
                 android:layout_width="match_parent"
                 android:layout_height="48dp"
-                android:hint="密码"
-                android:textColorHint="#FF666666"
+                android:layout_marginBottom="10dp">
+
+                <EditText
+                    android:id="@+id/etPassword"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:hint="密码"
+                    android:textColorHint="#FF666666"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="15sp"
+                    android:inputType="textPassword"
+                    android:background="@drawable/bg_input"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="48dp"
+                    android:singleLine="true" />
+
+                <ImageButton
+                    android:id="@+id/btnTogglePassword"
+                    android:layout_width="48dp"
+                    android:layout_height="match_parent"
+                    android:layout_alignParentEnd="true"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@android:drawable/ic_menu_view"
+                    android:scaleType="centerInside"
+                    android:contentDescription="显示密码"
+                    android:tint="#FF888888" />
+            </RelativeLayout>
+
+            <Button
+                android:id="@+id/btnWebViewLogin"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:text="WebView登录（推荐）"
                 android:textColor="#FFFFFFFF"
-                android:textSize="15sp"
-                android:inputType="textPassword"
-                android:background="@drawable/bg_input"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
-                android:singleLine="true" />
+                android:textSize="14sp"
+                android:backgroundTint="#FF2196F3"
+                android:layout_marginTop="4dp" />
 
         </LinearLayout>
 

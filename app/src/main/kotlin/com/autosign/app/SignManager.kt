@@ -1,6 +1,9 @@
 package com.autosign.app
 
+import okhttp3.Cookie
+import okhttp3.CookieJar
 import okhttp3.FormBody
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -16,15 +19,28 @@ import javax.crypto.spec.SecretKeySpec
 class SignManager {
 
     companion object {
-        private const val URL_LOGIN = "https://www.mosoteach.cn/web/index.php?c=passport&m=account_login"
+        // 使用Android客户端API端点
+        private const val URL_LOGIN = "https://api.mosoteach.cn/mssvc/index.php/passport/account_login"
         private const val URL_COURSES = "https://api.mosoteach.cn/mssvc/index.php/cc/list_joined"
         private const val URL_CHECKIN_OPEN = "https://api.mosoteach.cn/mssvc/index.php/checkin/current_open"
         private const val URL_CHECKIN = "https://api.mosoteach.cn/mssvc/index.php/cc_clockin/clockin"
     }
 
+    // Cookie存储
+    private val cookieStore = mutableMapOf<String, List<Cookie>>()
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .cookieJar(object : CookieJar {
+            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                cookieStore[url.host] = cookies
+            }
+
+            override fun loadForRequest(url: HttpUrl): List<Cookie> {
+                return cookieStore[url.host] ?: emptyList()
+            }
+        })
         .build()
 
     // 用户信息
@@ -34,6 +50,7 @@ class SignManager {
     var secTs: String = ""
     var fullName: String = ""
     var isLoggedIn: Boolean = false
+    var proxyToken: String = ""
 
     data class Course(val id: String, val name: String)
 
@@ -105,8 +122,85 @@ class SignManager {
     // ==================== API 调用 ====================
 
     /**
-     * 登录
-     * @return Pair<Boolean, String> = (是否成功, 消息)
+     * 使用token登录（从WebView获取）
+     */
+    fun loginWithToken(token: String): Pair<Boolean, String> {
+        try {
+            proxyToken = token
+
+            // 使用token获取用户信息
+            val request = Request.Builder()
+                .url("https://coreapi-proxy.mosoteach.cn/index.php/user/info")
+                .header("User-Agent", "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 5 Build/SD1A.210817.037)")
+                .header("X-token", token)
+                .header("X-app-id", "MTANDROID")
+                .header("X-app-version", "5.4.28")
+                .get()
+                .build()
+
+            val response = client.newCall(request).execute()
+            val body = response.body?.string() ?: return Pair(false, "响应为空")
+
+            val trimmedBody = body.trim()
+            if (!trimmedBody.startsWith("{")) {
+                return Pair(false, "获取用户信息失败")
+            }
+
+            val json = JSONObject(trimmedBody)
+
+            if (json.has("user_id")) {
+                userId = json.getString("user_id")
+                fullName = json.optString("full_name", "用户")
+                accessId = json.optString("access_id", "")
+                accessSecret = json.optString("access_secret", "")
+                secTs = json.optString("last_sec_update_ts_s", "")
+                isLoggedIn = true
+                return Pair(true, "登录成功: $fullName")
+            }
+
+            return Pair(false, "获取用户信息失败")
+        } catch (e: Exception) {
+            return Pair(false, "登录异常: ${e.message}")
+        }
+    }
+
+    /**
+     * 使用WebView登录后获取的信息登录
+     */
+    fun loginWithWebViewData(data: String): Pair<Boolean, String> {
+        try {
+            val json = JSONObject(data)
+
+            if (json.has("user_id")) {
+                userId = json.getString("user_id")
+                fullName = json.optString("full_name", "用户")
+                accessId = json.optString("access_id", "")
+                accessSecret = json.optString("access_secret", "")
+                secTs = json.optString("last_sec_update_ts_s", "")
+                isLoggedIn = true
+                return Pair(true, "登录成功: $fullName")
+            }
+
+            // 尝试解析嵌套的user对象
+            if (json.has("user")) {
+                val user = json.getJSONObject("user")
+                userId = user.getString("user_id")
+                accessId = user.getString("access_id")
+                accessSecret = user.getString("access_secret")
+                secTs = user.getString("last_sec_update_ts_s")
+                fullName = user.optString("full_name", "用户")
+                isLoggedIn = true
+                return Pair(true, "登录成功: $fullName")
+            }
+
+            return Pair(false, "解析用户信息失败")
+        } catch (e: Exception) {
+            return Pair(false, "登录异常: ${e.message}")
+        }
+    }
+
+    /**
+     * 传统登录方式（可能不工作）
      */
     fun login(username: String, password: String): Pair<Boolean, String> {
         try {
@@ -118,9 +212,11 @@ class SignManager {
 
             val request = Request.Builder()
                 .url(URL_LOGIN)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36")
+                .header("User-Agent", "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 5 Build/SD1A.210817.037)")
                 .header("Content-Type", "application/x-www-form-urlencoded")
-                .header("Accept", "application/json")
+                .header("X-app-id", "MTANDROID")
+                .header("X-app-version", "5.4.28")
+                .header("X-scheme", "https")
                 .post(formBody)
                 .build()
 
@@ -130,12 +226,9 @@ class SignManager {
             // 检查响应是否为JSON格式
             val trimmedBody = body.trim()
             if (!trimmedBody.startsWith("{")) {
-                // 服务器返回了HTML或其他非JSON内容
                 return when {
                     trimmedBody.contains("DOCTYPE") || trimmedBody.contains("<html") ->
-                        Pair(false, "账号或密码错误")
-                    trimmedBody.contains("error") || trimmedBody.contains("Error") ->
-                        Pair(false, "服务器错误，请稍后重试")
+                        Pair(false, "服务器返回HTML，请使用WebView登录")
                     else ->
                         Pair(false, "登录失败: 服务器返回异常响应")
                 }
@@ -156,6 +249,8 @@ class SignManager {
                 val msg = json.optString("result_msg", "未知错误")
                 val code = json.optInt("result_code", -1)
                 when {
+                    msg.contains("参数错误") ->
+                        Pair(false, "API已更新，请使用WebView登录")
                     msg.contains("密码") || msg.contains("password") ->
                         Pair(false, "密码错误，请重新输入")
                     msg.contains("账号") || msg.contains("account") || msg.contains("exist") ->
@@ -182,6 +277,61 @@ class SignManager {
         if (!isLoggedIn) return emptyList()
 
         try {
+            // 优先使用coreapi-proxy端点
+            val url = "https://coreapi-proxy.mosoteach.cn/index.php/online-courses/joined"
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 5 Build/SD1A.210817.037)")
+                .header("X-token", proxyToken)
+                .header("X-app-id", "MTANDROID")
+                .header("X-app-version", "5.4.28")
+                .get()
+                .build()
+
+            val response = client.newCall(request).execute()
+            val body = response.body?.string() ?: return emptyList()
+
+            val trimmedBody = body.trim()
+            if (!trimmedBody.startsWith("{")) return emptyList()
+
+            val json = JSONObject(trimmedBody)
+
+            // 新API返回格式
+            if (json.has("courses")) {
+                val coursesArray = json.getJSONArray("courses")
+                val courses = mutableListOf<Course>()
+                for (i in 0 until coursesArray.length()) {
+                    val course = coursesArray.getJSONObject(i)
+                    val id = course.optString("oid", "")
+                    val name = course.optString("name", "未知课程")
+                    if (id.isNotEmpty()) {
+                        courses.add(Course(id, name))
+                    }
+                }
+                return courses
+            }
+
+            // 旧API返回格式
+            val rows = json.optJSONArray("rows") ?: return emptyList()
+            val courses = mutableListOf<Course>()
+            for (i in 0 until rows.length()) {
+                val row = rows.getJSONObject(i)
+                val term = row.optJSONObject("term")
+                if (term?.optString("is_current") == "Y") {
+                    val courseObj = row.optJSONObject("course")
+                    val name = courseObj?.optString("name") ?: "未知课程"
+                    courses.add(Course(row.getString("id"), name))
+                }
+            }
+            return courses
+        } catch (e: Exception) {
+            // 尝试使用旧API
+            return getCoursesLegacy()
+        }
+    }
+
+    private fun getCoursesLegacy(): List<Course> {
+        try {
             val headers = buildHeaders(URL_COURSES, method = 1)
             val requestBuilder = Request.Builder().url(URL_COURSES).get()
             headers.forEach { (k, v) -> requestBuilder.header(k, v) }
@@ -189,7 +339,6 @@ class SignManager {
             val response = client.newCall(requestBuilder.build()).execute()
             val body = response.body?.string() ?: return emptyList()
 
-            // 检查响应是否为JSON
             val trimmedBody = body.trim()
             if (!trimmedBody.startsWith("{")) return emptyList()
 
@@ -231,7 +380,6 @@ class SignManager {
             val response = client.newCall(requestBuilder.build()).execute()
             val body = response.body?.string() ?: return Pair(false, null)
 
-            // 检查响应是否为JSON
             val trimmedBody = body.trim()
             if (!trimmedBody.startsWith("{")) return Pair(false, null)
 
@@ -267,7 +415,6 @@ class SignManager {
             val response = client.newCall(requestBuilder.build()).execute()
             val body = response.body?.string() ?: return Pair(false, "响应为空")
 
-            // 检查响应是否为JSON
             val trimmedBody = body.trim()
             if (!trimmedBody.startsWith("{")) return Pair(false, "签到失败: 服务器返回异常")
 

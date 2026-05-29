@@ -26,6 +26,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".LoginWebViewActivity"
+            android:exported="false"
+            android:label="云班课登录" />
+
         <service
             android:name=".AutoSignService"
             android:exported="false"
