@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.webkit.*
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -16,19 +17,23 @@ class LoginWebViewActivity : AppCompatActivity() {
         const val EXTRA_PASSWORD = "password"
         const val RESULT_LOGIN_SUCCESS = 100
         const val RESULT_LOGIN_FAILED = 101
+        private const val TAG = "LoginWebView"
     }
 
     private lateinit var webView: WebView
     private var isLoginHandled = false
-    private var lastUrl = ""
     private val handler = Handler(Looper.getMainLooper())
+    private var pageLoadCount = 0
 
     // 定时检查登录状态
     private val checkRunnable = object : Runnable {
         override fun run() {
             if (!isLoginHandled) {
+                Log.d(TAG, "定时检查登录状态...")
                 checkLoginAndFinish()
-                handler.postDelayed(this, 3000) // 每3秒检查一次
+                if (!isLoginHandled) {
+                    handler.postDelayed(this, 2000) // 每2秒检查一次
+                }
             }
         }
     }
@@ -40,6 +45,8 @@ class LoginWebViewActivity : AppCompatActivity() {
         val username = intent.getStringExtra(EXTRA_USERNAME) ?: ""
         val password = intent.getStringExtra(EXTRA_PASSWORD) ?: ""
 
+        Log.d(TAG, "onCreate: username=$username")
+
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -49,13 +56,11 @@ class LoginWebViewActivity : AppCompatActivity() {
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-
-                    if (url != null) {
-                        lastUrl = url
-                    }
+                    pageLoadCount++
+                    Log.d(TAG, "onPageFinished: url=$url, count=$pageLoadCount")
 
                     // 自动填充表单（只在登录页面）
-                    if (url != null && url.contains("passport") && username.isNotEmpty()) {
+                    if (url != null && url.contains("passport") && username.isNotEmpty() && pageLoadCount <= 2) {
                         handler.postDelayed({
                             val fillScript = """
                                 (function() {
@@ -81,20 +86,22 @@ class LoginWebViewActivity : AppCompatActivity() {
                                 })();
                             """.trimIndent()
                             view?.evaluateJavascript(fillScript) { result ->
-                                // 填充完成
+                                Log.d(TAG, "填充表单结果: $result")
                             }
-                        }, 1000)
+                        }, 1500)
                     }
 
-                    // 检测是否离开了登录页面
-                    if (!isLoginHandled && url != null && !url.contains("passport")) {
-                        // 离开登录页面了，检查是否登录成功
-                        checkLoginAndFinish()
+                    // 每次页面加载完成后都检查登录状态
+                    if (!isLoginHandled && pageLoadCount > 1) {
+                        handler.postDelayed({
+                            checkLoginAndFinish()
+                        }, 500)
                     }
                 }
 
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                    return false // 不拦截URL加载
+                    Log.d(TAG, "shouldOverrideUrlLoading: ${request?.url}")
+                    return false
                 }
             }
 
@@ -104,18 +111,23 @@ class LoginWebViewActivity : AppCompatActivity() {
         setContentView(webView)
         webView.loadUrl("https://www.mosoteach.cn/web/index.php?c=passport")
 
-        // 启动定时检查
-        handler.postDelayed(checkRunnable, 5000) // 5秒后开始检查
+        // 启动定时检查（3秒后开始，每2秒检查一次）
+        handler.postDelayed(checkRunnable, 3000)
     }
 
     private fun checkLoginAndFinish() {
         if (isLoginHandled) return
 
-        // 检查当前URL
-        val currentUrl = webView.url ?: return
+        val currentUrl = webView.url ?: run {
+            Log.d(TAG, "webView.url is null")
+            return
+        }
+
+        Log.d(TAG, "checkLoginAndFinish: currentUrl=$currentUrl")
 
         // 如果还在登录页面，说明还没登录
         if (currentUrl.contains("passport")) {
+            Log.d(TAG, "还在登录页面，跳过检查")
             return
         }
 
@@ -123,65 +135,40 @@ class LoginWebViewActivity : AppCompatActivity() {
         val cookies = CookieManager.getInstance().getCookie("https://www.mosoteach.cn") ?: ""
         val apiCookies = CookieManager.getInstance().getCookie("https://api.mosoteach.cn") ?: ""
 
-        // 检查是否有登录相关的cookie
-        val hasLoginCookie = cookies.contains("mooc_") ||
-                cookies.contains("uid") ||
-                cookies.contains("token") ||
-                cookies.contains("session") ||
-                apiCookies.isNotEmpty()
+        Log.d(TAG, "cookies: ${cookies.take(100)}...")
+        Log.d(TAG, "apiCookies: ${apiCookies.take(100)}...")
 
-        // 检查页面内容
-        webView.evaluateJavascript(
-            """
-            (function() {
-                try {
-                    var body = document.body ? document.body.innerText : '';
-                    var title = document.title || '';
-                    // 检查是否包含登录成功的标志
-                    if (body.indexOf('退出') >= 0 || body.indexOf('注销') >= 0 ||
-                        body.indexOf('我的课程') >= 0 || body.indexOf('个人中心') >= 0 ||
-                        title.indexOf('首页') >= 0 || title.indexOf('我的') >= 0) {
-                        return 'logged_in';
-                    }
-                    // 检查是否有课程相关内容
-                    if (body.indexOf('课程') >= 0 && body.indexOf('登录') < 0) {
-                        return 'probably_logged_in';
-                    }
-                    return 'not_logged_in';
-                } catch(e) {
-                    return 'error';
-                }
-            })();
-            """.trimIndent()
-        ) { result ->
-            if (isLoginHandled) return@evaluateJavascript
+        // 简化判断：只要离开了登录页面，就认为登录成功
+        // 因为云班课登录成功后会自动跳转到首页
+        val isLoggedIn = !currentUrl.contains("passport")
 
-            val isLoggedIn = result.contains("logged_in") ||
-                    result.contains("probably_logged_in") ||
-                    (hasLoginCookie && !currentUrl.contains("passport"))
+        if (isLoggedIn) {
+            Log.d(TAG, "登录成功！")
+            isLoginHandled = true
+            handler.removeCallbacks(checkRunnable)
 
-            if (isLoggedIn) {
-                isLoginHandled = true
-                handler.removeCallbacks(checkRunnable)
+            // 获取所有cookies
+            val allCookies = CookieManager.getInstance().getCookie("https://www.mosoteach.cn") ?: ""
+            val allApiCookies = CookieManager.getInstance().getCookie("https://api.mosoteach.cn") ?: ""
+            val combinedCookies = if (allApiCookies.isNotEmpty()) "$allCookies; $allApiCookies" else allCookies
 
-                // 获取所有cookies
-                val allCookies = CookieManager.getInstance().getCookie("https://www.mosoteach.cn") ?: ""
-                val allApiCookies = CookieManager.getInstance().getCookie("https://api.mosoteach.cn") ?: ""
-                val combinedCookies = if (allApiCookies.isNotEmpty()) "$allCookies; $allApiCookies" else allCookies
+            Log.d(TAG, "combinedCookies长度: ${combinedCookies.length}")
 
-                Toast.makeText(this@LoginWebViewActivity, "登录成功！", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this@LoginWebViewActivity, "登录成功！正在启动签到...", Toast.LENGTH_SHORT).show()
 
-                val resultIntent = Intent().apply {
-                    putExtra("cookies", combinedCookies)
-                    putExtra("url", currentUrl)
-                }
-                setResult(RESULT_LOGIN_SUCCESS, resultIntent)
-                finish()
+            val resultIntent = Intent().apply {
+                putExtra("cookies", combinedCookies)
+                putExtra("url", currentUrl)
             }
+            setResult(RESULT_LOGIN_SUCCESS, resultIntent)
+            finish()
+        } else {
+            Log.d(TAG, "未检测到登录成功")
         }
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "onDestroy")
         handler.removeCallbacks(checkRunnable)
         webView.destroy()
         super.onDestroy()
