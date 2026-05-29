@@ -1,7 +1,6 @@
 package com.autosign.app
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -67,7 +66,7 @@ class MainActivity : AppCompatActivity() {
             etPassword.setSelection(etPassword.text.length)
         }
 
-        // WebView登录按钮
+        // WebView登录按钮 - 登录成功后自动启动签到
         btnWebViewLogin.setOnClickListener {
             val username = etUsername.text.toString().trim()
             val password = etPassword.text.toString().trim()
@@ -130,24 +129,49 @@ class MainActivity : AppCompatActivity() {
 
         if (requestCode == REQUEST_WEB_LOGIN) {
             if (resultCode == LoginWebViewActivity.RESULT_LOGIN_SUCCESS) {
-                val token = data?.getStringExtra("token") ?: ""
-                val loginData = data?.getStringExtra("login_data") ?: ""
+                val cookies = data?.getStringExtra("cookies") ?: ""
+                val url = data?.getStringExtra("url") ?: ""
 
-                if (token.isNotEmpty()) {
-                    // 使用token登录
-                    appendLog("[系统] WebView登录成功，正在获取信息...")
-                    // 保存token并启动服务
-                    prefs.edit().putString("proxy_token", token).apply()
-                    Toast.makeText(this, "登录成功！", Toast.LENGTH_SHORT).show()
-                } else if (loginData.isNotEmpty()) {
-                    appendLog("[系统] 获取到用户信息")
-                    prefs.edit().putString("login_data", loginData).apply()
-                    Toast.makeText(this, "登录成功！", Toast.LENGTH_SHORT).show()
+                if (cookies.isNotEmpty()) {
+                    appendLog("[系统] WebView登录成功!")
+                    // 保存cookies
+                    prefs.edit().putString("cookies", cookies).apply()
+                    // 自动启动签到服务
+                    startAutoSignWithCookies(cookies)
+                } else {
+                    appendLog("[系统] 登录失败：未获取到cookies")
+                    Toast.makeText(this, "登录失败，请重试", Toast.LENGTH_SHORT).show()
                 }
             } else {
-                appendLog("[系统] WebView登录取消或失败")
+                appendLog("[系统] 登录取消或失败")
             }
         }
+    }
+
+    private fun startAutoSignWithCookies(cookies: String) {
+        val username = etUsername.text.toString().trim()
+        val password = etPassword.text.toString().trim()
+
+        // 清空日志
+        logLines.clear()
+        tvLog.text = ""
+        tvCourses.text = "正在获取..."
+
+        // 启动前台服务
+        val intent = Intent(this, AutoSignService::class.java).apply {
+            putExtra("username", username)
+            putExtra("password", password)
+            putExtra("cookies", cookies)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+
+        updateUI(true)
+        appendLog("[系统] 自动签到服务启动中...")
     }
 
     private fun startAutoSign() {
@@ -171,16 +195,20 @@ class MainActivity : AppCompatActivity() {
         tvLog.text = ""
         tvCourses.text = "正在获取..."
 
-        // 获取保存的token和登录数据
-        val token = prefs.getString("proxy_token", "") ?: ""
-        val loginData = prefs.getString("login_data", "") ?: ""
+        // 获取保存的cookies
+        val cookies = prefs.getString("cookies", "") ?: ""
+
+        if (cookies.isEmpty()) {
+            appendLog("[系统] 请先点击'WebView登录'按钮登录")
+            switchAutoSign.isChecked = false
+            return
+        }
 
         // 启动前台服务
         val intent = Intent(this, AutoSignService::class.java).apply {
             putExtra("username", username)
             putExtra("password", password)
-            putExtra("proxy_token", token)
-            putExtra("login_data", loginData)
+            putExtra("cookies", cookies)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -226,7 +254,6 @@ class MainActivity : AppCompatActivity() {
         }
         tvLog.text = logLines.joinToString("\n")
 
-        // 自动滚动到底部
         val scrollView = tvLog.parent as? ScrollView
         scrollView?.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
     }

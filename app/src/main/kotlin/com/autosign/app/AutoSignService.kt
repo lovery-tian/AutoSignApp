@@ -42,11 +42,16 @@ class AutoSignService : Service() {
 
         val username = intent?.getStringExtra("username") ?: ""
         val password = intent?.getStringExtra("password") ?: ""
-        val proxyToken = intent?.getStringExtra("proxy_token") ?: ""
-        val loginData = intent?.getStringExtra("login_data") ?: ""
+        val cookies = intent?.getStringExtra("cookies") ?: ""
 
         if (username.isEmpty() || password.isEmpty()) {
             sendLog("错误: 账号或密码为空")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        if (cookies.isEmpty()) {
+            sendLog("错误: 未登录，请先使用WebView登录")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -56,7 +61,7 @@ class AutoSignService : Service() {
 
         if (!running.getAndSet(true)) {
             isRunning = true
-            workerThread = Thread { workerLoop(username, password, proxyToken, loginData) }.apply { start() }
+            workerThread = Thread { workerLoop(username, password, cookies) }.apply { start() }
         }
 
         return START_STICKY
@@ -71,51 +76,20 @@ class AutoSignService : Service() {
         super.onDestroy()
     }
 
-    private fun workerLoop(username: String, password: String, proxyToken: String = "", loginData: String = "") {
-        // 登录
+    private fun workerLoop(username: String, password: String, cookies: String) {
+        // 使用cookies登录
         sendLog("正在登录...")
-
-        var loginOk = false
-        var loginMsg = ""
-
-        // 优先使用WebView获取的登录数据
-        if (loginData.isNotEmpty()) {
-            val (ok, msg) = signManager.loginWithWebViewData(loginData)
-            loginOk = ok
-            loginMsg = msg
-            if (ok) {
-                sendLog("✅ [WebView数据] $loginMsg")
-            }
-        }
-
-        // 如果没有loginData，尝试使用token
-        if (!loginOk && proxyToken.isNotEmpty()) {
-            val (ok, msg) = signManager.loginWithToken(proxyToken)
-            loginOk = ok
-            loginMsg = msg
-            if (ok) {
-                sendLog("✅ [Token] $loginMsg")
-            }
-        }
-
-        // 如果都失败，尝试传统登录
-        if (!loginOk) {
-            val (ok, msg) = signManager.login(username, password)
-            loginOk = ok
-            loginMsg = msg
-            if (ok) {
-                sendLog("✅ $loginMsg")
-            }
-        }
+        val (loginOk, loginMsg) = signManager.loginWithCookies(cookies)
 
         if (!loginOk) {
             sendLog("❌ $loginMsg")
-            sendLog("请使用'WebView登录'按钮登录，或检查账号密码")
+            sendLog("请重新使用WebView登录")
             updateNotification("登录失败: $loginMsg")
             Thread.sleep(3000)
             stopSelf()
             return
         }
+        sendLog("✅ $loginMsg")
 
         // 获取课程
         sendLog("正在获取课程...")
